@@ -259,7 +259,12 @@ func (m *messageCmp) renderThinkingContent() string {
 		return ""
 	}
 	lines := strings.Split(reasoningContent.Thinking, "\n")
+
+	// Pre-allocate builder capacity based on estimated content size
+	estimatedSize := len(reasoningContent.Thinking) + (len(lines) * 20) // Extra space for styling
 	var content strings.Builder
+	content.Grow(estimatedSize)
+
 	lineStyle := t.S().Subtle.Background(t.BgBaseLighter)
 	for i, line := range lines {
 		if line == "" {

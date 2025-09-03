@@ -87,108 +87,40 @@ func Prepare(ctx context.Context, db DBTX) (*Queries, error) {
 	return &q, nil
 }
 
+// closeStmt is a helper function to close a statement and accumulate errors
+func closeStmt(stmt *sql.Stmt, name string, err *error) {
+	if stmt != nil {
+		if cerr := stmt.Close(); cerr != nil && *err == nil {
+			*err = fmt.Errorf("error closing %s: %w", name, cerr)
+		}
+	}
+}
+
 func (q *Queries) Close() error {
 	var err error
-	if q.createFileStmt != nil {
-		if cerr := q.createFileStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing createFileStmt: %w", cerr)
-		}
-	}
-	if q.createMessageStmt != nil {
-		if cerr := q.createMessageStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing createMessageStmt: %w", cerr)
-		}
-	}
-	if q.createSessionStmt != nil {
-		if cerr := q.createSessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing createSessionStmt: %w", cerr)
-		}
-	}
-	if q.deleteFileStmt != nil {
-		if cerr := q.deleteFileStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteFileStmt: %w", cerr)
-		}
-	}
-	if q.deleteMessageStmt != nil {
-		if cerr := q.deleteMessageStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteMessageStmt: %w", cerr)
-		}
-	}
-	if q.deleteSessionStmt != nil {
-		if cerr := q.deleteSessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteSessionStmt: %w", cerr)
-		}
-	}
-	if q.deleteSessionFilesStmt != nil {
-		if cerr := q.deleteSessionFilesStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteSessionFilesStmt: %w", cerr)
-		}
-	}
-	if q.deleteSessionMessagesStmt != nil {
-		if cerr := q.deleteSessionMessagesStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing deleteSessionMessagesStmt: %w", cerr)
-		}
-	}
-	if q.getFileStmt != nil {
-		if cerr := q.getFileStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getFileStmt: %w", cerr)
-		}
-	}
-	if q.getFileByPathAndSessionStmt != nil {
-		if cerr := q.getFileByPathAndSessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getFileByPathAndSessionStmt: %w", cerr)
-		}
-	}
-	if q.getMessageStmt != nil {
-		if cerr := q.getMessageStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getMessageStmt: %w", cerr)
-		}
-	}
-	if q.getSessionByIDStmt != nil {
-		if cerr := q.getSessionByIDStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing getSessionByIDStmt: %w", cerr)
-		}
-	}
-	if q.listFilesByPathStmt != nil {
-		if cerr := q.listFilesByPathStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listFilesByPathStmt: %w", cerr)
-		}
-	}
-	if q.listFilesBySessionStmt != nil {
-		if cerr := q.listFilesBySessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listFilesBySessionStmt: %w", cerr)
-		}
-	}
-	if q.listLatestSessionFilesStmt != nil {
-		if cerr := q.listLatestSessionFilesStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listLatestSessionFilesStmt: %w", cerr)
-		}
-	}
-	if q.listMessagesBySessionStmt != nil {
-		if cerr := q.listMessagesBySessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listMessagesBySessionStmt: %w", cerr)
-		}
-	}
-	if q.listNewFilesStmt != nil {
-		if cerr := q.listNewFilesStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listNewFilesStmt: %w", cerr)
-		}
-	}
-	if q.listSessionsStmt != nil {
-		if cerr := q.listSessionsStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing listSessionsStmt: %w", cerr)
-		}
-	}
-	if q.updateMessageStmt != nil {
-		if cerr := q.updateMessageStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing updateMessageStmt: %w", cerr)
-		}
-	}
-	if q.updateSessionStmt != nil {
-		if cerr := q.updateSessionStmt.Close(); cerr != nil {
-			err = fmt.Errorf("error closing updateSessionStmt: %w", cerr)
-		}
-	}
+
+	// Use helper function to reduce repetitive code
+	closeStmt(q.createFileStmt, "createFileStmt", &err)
+	closeStmt(q.createMessageStmt, "createMessageStmt", &err)
+	closeStmt(q.createSessionStmt, "createSessionStmt", &err)
+	closeStmt(q.deleteFileStmt, "deleteFileStmt", &err)
+	closeStmt(q.deleteMessageStmt, "deleteMessageStmt", &err)
+	closeStmt(q.deleteSessionStmt, "deleteSessionStmt", &err)
+	closeStmt(q.deleteSessionFilesStmt, "deleteSessionFilesStmt", &err)
+	closeStmt(q.deleteSessionMessagesStmt, "deleteSessionMessagesStmt", &err)
+	closeStmt(q.getFileStmt, "getFileStmt", &err)
+	closeStmt(q.getFileByPathAndSessionStmt, "getFileByPathAndSessionStmt", &err)
+	closeStmt(q.getMessageStmt, "getMessageStmt", &err)
+	closeStmt(q.getSessionByIDStmt, "getSessionByIDStmt", &err)
+	closeStmt(q.listFilesByPathStmt, "listFilesByPathStmt", &err)
+	closeStmt(q.listFilesBySessionStmt, "listFilesBySessionStmt", &err)
+	closeStmt(q.listLatestSessionFilesStmt, "listLatestSessionFilesStmt", &err)
+	closeStmt(q.listMessagesBySessionStmt, "listMessagesBySessionStmt", &err)
+	closeStmt(q.listNewFilesStmt, "listNewFilesStmt", &err)
+	closeStmt(q.listSessionsStmt, "listSessionsStmt", &err)
+	closeStmt(q.updateMessageStmt, "updateMessageStmt", &err)
+	closeStmt(q.updateSessionStmt, "updateSessionStmt", &err)
+
 	return err
 }
 

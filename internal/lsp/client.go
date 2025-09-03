@@ -443,13 +443,14 @@ func (c *Client) ping(ctx context.Context) error {
 	return c.Notify(ctx, "$/cancelRequest", protocol.CancelParams{ID: "1"})
 }
 
-// openTypeScriptFiles finds and opens TypeScript files to help initialize the server
+// openTypeScriptFiles finds and opens TypeScript files to help initialize the server with batching
 func (c *Client) openTypeScriptFiles(ctx context.Context, workDir string) {
 	cfg := config.Get()
-	filesOpened := 0
 	maxFilesToOpen := 5 // Limit to a reasonable number of files
 
-	// Find and open TypeScript files
+	// Collect files to open first
+	var filesToOpen []string
+
 	err := filepath.WalkDir(workDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -464,21 +465,15 @@ func (c *Client) openTypeScriptFiles(ctx context.Context, workDir string) {
 			return nil
 		}
 
-		// Check if we've opened enough files
-		if filesOpened >= maxFilesToOpen {
+		// Check if we've found enough files
+		if len(filesToOpen) >= maxFilesToOpen {
 			return filepath.SkipAll
 		}
 
 		// Check file extension
 		ext := filepath.Ext(path)
 		if ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" {
-			// Try to open the file
-			if err := c.OpenFile(ctx, path); err == nil {
-				filesOpened++
-				if cfg.Options.DebugLSP {
-					slog.Debug("Opened TypeScript file for initialization", "file", path)
-				}
-			}
+			filesToOpen = append(filesToOpen, path)
 		}
 
 		return nil
@@ -488,8 +483,55 @@ func (c *Client) openTypeScriptFiles(ctx context.Context, workDir string) {
 		slog.Debug("Error walking directory for TypeScript files", "error", err)
 	}
 
+	// Open files in batch using goroutines for better performance
+	if len(filesToOpen) > 0 {
+		c.openFilesBatch(ctx, filesToOpen)
+	}
+
 	if cfg.Options.DebugLSP {
-		slog.Debug("Opened TypeScript files for initialization", "count", filesOpened)
+		slog.Debug("Opened TypeScript files for initialization", "count", len(filesToOpen))
+	}
+}
+
+// openFilesBatch opens multiple files concurrently for better performance
+func (c *Client) openFilesBatch(ctx context.Context, filePaths []string) {
+	cfg := config.Get()
+
+	// Use a semaphore to limit concurrent file operations
+	const maxConcurrent = 3
+	sem := make(chan struct{}, maxConcurrent)
+
+	var wg sync.WaitGroup
+	successCount := 0
+	var mu sync.Mutex
+
+	for _, filePath := range filePaths {
+		wg.Add(1)
+		go func(path string) {
+			defer wg.Done()
+
+			// Acquire semaphore
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if err := c.OpenFile(ctx, path); err == nil {
+				mu.Lock()
+				successCount++
+				mu.Unlock()
+
+				if cfg.Options.DebugLSP {
+					slog.Debug("Opened file for initialization", "file", path)
+				}
+			} else if cfg.Options.DebugLSP {
+				slog.Debug("Failed to open file for initialization", "file", path, "error", err)
+			}
+		}(filePath)
+	}
+
+	wg.Wait()
+
+	if cfg.Options.DebugLSP {
+		slog.Debug("Batch file opening completed", "requested", len(filePaths), "successful", successCount)
 	}
 }
 

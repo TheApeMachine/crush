@@ -19,16 +19,20 @@ import (
 	"github.com/charmbracelet/crush/internal/fsext"
 )
 
-// regexCache provides thread-safe caching of compiled regex patterns
+// regexCache provides thread-safe caching of compiled regex patterns with size limits
 type regexCache struct {
-	cache map[string]*regexp.Regexp
-	mu    sync.RWMutex
+	cache    map[string]*regexp.Regexp
+	mu       sync.RWMutex
+	maxSize  int
+	accessed map[string]int64 // Track access time for LRU eviction
 }
 
-// newRegexCache creates a new regex cache
+// newRegexCache creates a new regex cache with a maximum size
 func newRegexCache() *regexCache {
 	return &regexCache{
-		cache: make(map[string]*regexp.Regexp),
+		cache:    make(map[string]*regexp.Regexp),
+		maxSize:  100, // Limit cache to 100 compiled regexes
+		accessed: make(map[string]int64),
 	}
 }
 
@@ -38,6 +42,12 @@ func (rc *regexCache) get(pattern string) (*regexp.Regexp, error) {
 	rc.mu.RLock()
 	if regex, exists := rc.cache[pattern]; exists {
 		rc.mu.RUnlock()
+		
+		// Update access time with write lock
+		rc.mu.Lock()
+		rc.accessed[pattern] = time.Now().Unix()
+		rc.mu.Unlock()
+		
 		return regex, nil
 	}
 	rc.mu.RUnlock()
@@ -48,7 +58,13 @@ func (rc *regexCache) get(pattern string) (*regexp.Regexp, error) {
 
 	// Double-check in case another goroutine compiled it while we waited
 	if regex, exists := rc.cache[pattern]; exists {
+		rc.accessed[pattern] = time.Now().Unix()
 		return regex, nil
+	}
+
+	// Check if we need to evict entries before adding new one
+	if len(rc.cache) >= rc.maxSize {
+		rc.evictLRU()
 	}
 
 	// Compile and cache the regex
@@ -58,7 +74,30 @@ func (rc *regexCache) get(pattern string) (*regexp.Regexp, error) {
 	}
 
 	rc.cache[pattern] = regex
+	rc.accessed[pattern] = time.Now().Unix()
 	return regex, nil
+}
+
+// evictLRU removes the least recently used entry from the cache
+func (rc *regexCache) evictLRU() {
+	if len(rc.cache) == 0 {
+		return
+	}
+
+	var oldestPattern string
+	var oldestTime int64 = 9223372036854775807 // math.MaxInt64
+
+	for pattern, accessTime := range rc.accessed {
+		if accessTime < oldestTime {
+			oldestTime = accessTime
+			oldestPattern = pattern
+		}
+	}
+
+	if oldestPattern != "" {
+		delete(rc.cache, oldestPattern)
+		delete(rc.accessed, oldestPattern)
+	}
 }
 
 // Global regex cache instances
@@ -421,20 +460,30 @@ func fileContainsPattern(filePath string, pattern *regexp.Regexp) (bool, int, st
 	return false, 0, "", scanner.Err()
 }
 
-var binaryExts = map[string]struct{}{
-	".exe": {}, ".dll": {}, ".so": {}, ".dylib": {},
-	".bin": {}, ".obj": {}, ".o": {}, ".a": {},
-	".zip": {}, ".tar": {}, ".gz": {}, ".bz2": {},
-	".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {},
-	".pdf": {}, ".doc": {}, ".docx": {}, ".xls": {},
-	".mp3": {}, ".mp4": {}, ".avi": {}, ".mov": {},
+// Buffer pool for file reading to reduce allocations
+var fileReadBufferPool = sync.Pool{
+	New: func() any {
+		return make([]byte, 512)
+	},
 }
+
+// Binary extensions map using sync.OnceValue for better performance
+var binaryExts = sync.OnceValue(func() map[string]struct{} {
+	return map[string]struct{}{
+		".exe": {}, ".dll": {}, ".so": {}, ".dylib": {},
+		".bin": {}, ".obj": {}, ".o": {}, ".a": {},
+		".zip": {}, ".tar": {}, ".gz": {}, ".bz2": {},
+		".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {},
+		".pdf": {}, ".doc": {}, ".docx": {}, ".xls": {},
+		".mp3": {}, ".mp4": {}, ".avi": {}, ".mov": {},
+	}
+})
 
 // isBinaryFile performs a quick check to determine if a file is binary
 func isBinaryFile(filePath string) bool {
 	// Check file extension first (fastest)
 	ext := strings.ToLower(filepath.Ext(filePath))
-	if _, isBinary := binaryExts[ext]; isBinary {
+	if _, isBinary := binaryExts()[ext]; isBinary {
 		return true
 	}
 
@@ -445,8 +494,11 @@ func isBinaryFile(filePath string) bool {
 	}
 	defer file.Close()
 
+	// Get buffer from pool
+	buffer := fileReadBufferPool.Get().([]byte)
+	defer fileReadBufferPool.Put(buffer)
+
 	// Read first 512 bytes to check for null bytes
-	buffer := make([]byte, 512)
 	n, err := file.Read(buffer)
 	if err != nil && err != io.EOF {
 		return false

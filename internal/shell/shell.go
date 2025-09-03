@@ -27,6 +27,25 @@ import (
 	"mvdan.cc/sh/v3/syntax"
 )
 
+// Buffer pools for reducing allocations
+var (
+	stdoutBufferPool = sync.Pool{
+		New: func() any {
+			return &bytes.Buffer{}
+		},
+	}
+	stderrBufferPool = sync.Pool{
+		New: func() any {
+			return &bytes.Buffer{}
+		},
+	}
+	envSlicePool = sync.Pool{
+		New: func() any {
+			return make([]string, 0, 32) // Pre-allocate for common case
+		},
+	}
+)
+
 // ShellType represents the type of shell to use
 type ShellType int
 
@@ -124,14 +143,29 @@ func (s *Shell) SetWorkingDir(dir string) error {
 	return nil
 }
 
-// GetEnv returns a copy of the environment variables
+// GetEnv returns a copy of the environment variables using pooled slice
 func (s *Shell) GetEnv() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	env := make([]string, len(s.env))
-	copy(env, s.env)
-	return env
+	// Get slice from pool and ensure it has enough capacity
+	env := envSlicePool.Get().([]string)
+	env = env[:0] // Reset length but keep capacity
+
+	if cap(env) < len(s.env) {
+		env = make([]string, 0, len(s.env))
+	}
+
+	env = append(env, s.env...)
+
+	// Create a new slice to return (caller owns it)
+	result := make([]string, len(env))
+	copy(result, env)
+
+	// Return slice to pool
+	envSlicePool.Put(env)
+
+	return result
 }
 
 // SetEnv sets an environment variable
@@ -228,16 +262,29 @@ func (s *Shell) blockHandler() func(next interp.ExecHandlerFunc) interp.ExecHand
 	}
 }
 
-// execPOSIX executes commands using POSIX shell emulation (cross-platform)
+// execPOSIX executes commands using POSIX shell emulation (cross-platform) with buffer pooling
 func (s *Shell) execPOSIX(ctx context.Context, command string) (string, string, error) {
 	line, err := syntax.NewParser().Parse(strings.NewReader(command), "")
 	if err != nil {
 		return "", "", fmt.Errorf("could not parse command: %w", err)
 	}
 
-	var stdout, stderr bytes.Buffer
+	// Get buffers from pool
+	stdout := stdoutBufferPool.Get().(*bytes.Buffer)
+	stderr := stderrBufferPool.Get().(*bytes.Buffer)
+
+	// Reset buffers
+	stdout.Reset()
+	stderr.Reset()
+
+	// Ensure buffers are returned to pool
+	defer func() {
+		stdoutBufferPool.Put(stdout)
+		stderrBufferPool.Put(stderr)
+	}()
+
 	runner, err := interp.New(
-		interp.StdIO(nil, &stdout, &stderr),
+		interp.StdIO(nil, stdout, stderr),
 		interp.Interactive(false),
 		interp.Env(expand.ListEnviron(s.env...)),
 		interp.Dir(s.cwd),
@@ -249,10 +296,13 @@ func (s *Shell) execPOSIX(ctx context.Context, command string) (string, string, 
 
 	err = runner.Run(ctx, line)
 	s.cwd = runner.Dir
-	s.env = []string{}
+
+	// Update environment variables efficiently
+	s.env = s.env[:0] // Reset slice but keep capacity
 	for name, vr := range runner.Vars {
 		s.env = append(s.env, fmt.Sprintf("%s=%s", name, vr.Str))
 	}
+
 	s.logger.InfoPersist("POSIX command finished", "command", command, "err", err)
 	return stdout.String(), stderr.String(), err
 }
