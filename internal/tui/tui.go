@@ -29,6 +29,7 @@ import (
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs/sessions"
 	"github.com/charmbracelet/crush/internal/tui/page"
 	"github.com/charmbracelet/crush/internal/tui/page/chat"
+	symbolgraph "github.com/charmbracelet/crush/internal/tui/page/symbol_graph"
 	"github.com/charmbracelet/crush/internal/tui/styles"
 	"github.com/charmbracelet/crush/internal/tui/util"
 	"github.com/charmbracelet/lipgloss/v2"
@@ -477,6 +478,9 @@ func (a *appModel) handleKeyPressMsg(msg tea.KeyPressMsg) tea.Cmd {
 			},
 		)
 		return tea.Sequence(cmds...)
+	case key.Matches(msg, a.keyMap.SymbolGraph):
+		// Switch to symbol graph page
+		return a.moveToPage("symbol_graph")
 	case key.Matches(msg, a.keyMap.Suspend):
 		if a.app.CoderAgent != nil && a.app.CoderAgent.IsBusy() {
 			return util.ReportWarn("Agent is busy, please wait...")
@@ -601,6 +605,7 @@ func (a *appModel) View() tea.View {
 // New creates and initializes a new TUI application model.
 func New(app *app.App) tea.Model {
 	chatPage := chat.New(app)
+	symbolPage := symbolgraph.New(app)
 	keyMap := DefaultKeyMap()
 	keyMap.pageBindings = chatPage.Bindings()
 
@@ -612,7 +617,8 @@ func New(app *app.App) tea.Model {
 		keyMap:      keyMap,
 
 		pages: map[page.PageID]util.Model{
-			chat.ChatPageID: chatPage,
+			chat.ChatPageID:               chatPage,
+			symbolgraph.SymbolGraphPageID: symbolPage,
 		},
 
 		dialog:      dialogs.NewDialogCmp(),

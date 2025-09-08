@@ -33,6 +33,9 @@ type App struct {
 	Permissions permission.Service
 
 	CoderAgent agent.Service
+	DB         db.Querier
+
+	Indexer *Indexer
 
 	LSPClients map[string]*lsp.Client
 
@@ -65,11 +68,18 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 		allowedTools = cfg.Permissions.AllowedTools
 	}
 
+	indexer, err := NewIndexer(ctx, cfg, q)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create indexer: %w", err)
+	}
+
 	app := &App{
 		Sessions:    sessions,
 		Messages:    messages,
 		History:     files,
 		Permissions: permission.NewPermissionService(cfg.WorkingDir(), skipPermissionsRequests, allowedTools),
+		DB:          q,
+		Indexer:     indexer,
 		LSPClients:  make(map[string]*lsp.Client),
 
 		globalCtx: ctx,
@@ -87,6 +97,9 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 
 	// Initialize LSP clients in the background.
 	app.initLSPClients(ctx)
+
+	// Start the indexer to scan the workspace
+	app.Indexer.Start()
 
 	// TODO: remove the concept of agent config, most likely.
 	if cfg.IsConfigured() {
@@ -323,6 +336,11 @@ func (app *App) Subscribe(program *tea.Program) {
 func (app *App) Shutdown() {
 	if app.CoderAgent != nil {
 		app.CoderAgent.CancelAll()
+	}
+
+	// Stop the indexer
+	if app.Indexer != nil {
+		app.Indexer.Stop()
 	}
 
 	for cancel := range app.watcherCancelFuncs.Seq() {

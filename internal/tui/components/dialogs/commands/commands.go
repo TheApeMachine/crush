@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/crush/internal/tui/components/core"
 	"github.com/charmbracelet/crush/internal/tui/components/dialogs"
 	"github.com/charmbracelet/crush/internal/tui/exp/list"
+	"github.com/charmbracelet/crush/internal/tui/page"
 	"github.com/charmbracelet/crush/internal/tui/styles"
 	"github.com/charmbracelet/crush/internal/tui/util"
 )
@@ -378,6 +379,17 @@ func (c *commandDialogCmp) defaultCommands() []Command {
 			Description: "Toggle help",
 			Handler: func(cmd Command) tea.Cmd {
 				return util.CmdHandler(ToggleHelpMsg{})
+			},
+		},
+		{
+			ID:          "symbol_graph",
+			Title:       "Symbol Graph",
+			Description: "View symbol relationships and navigate code structure",
+			Shortcut:    "ctrl+y",
+			Handler: func(cmd Command) tea.Cmd {
+				return util.CmdHandler(page.PageChangeMsg{
+					ID: "symbol_graph",
+				})
 			},
 		},
 		{

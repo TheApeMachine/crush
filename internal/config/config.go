@@ -136,13 +136,22 @@ type Permissions struct {
 	SkipRequests bool     `json:"-"`                                                                                                                              // Automatically accept all permissions (YOLO mode)
 }
 
+type EditVerificationOptions struct {
+	Enabled                bool          `json:"enabled" jsonschema:"description=Enable edit verification middleware,default=true"`
+	BlastRadiusThreshold   int           `json:"blast_radius_threshold" jsonschema:"description=Maximum blast radius before requiring approval,default=10,minimum=1,maximum=1000"`
+	RequireApprovalForHigh bool          `json:"require_approval_for_high" jsonschema:"description=Require user approval for high-impact edits,default=true"`
+	AutoRollbackOnError    bool          `json:"auto_rollback_on_error" jsonschema:"description=Automatically rollback edits that cause regressions,default=true"`
+	AnalysisTimeout        time.Duration `json:"analysis_timeout" jsonschema:"description=Timeout for impact analysis in seconds,default=30,minimum=5,maximum=300"`
+}
+
 type Options struct {
-	ContextPaths         []string    `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
-	TUI                  *TUIOptions `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
-	Debug                bool        `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
-	DebugLSP             bool        `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
-	DisableAutoSummarize bool        `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
-	DataDirectory        string      `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
+	ContextPaths         []string                 `json:"context_paths,omitempty" jsonschema:"description=Paths to files containing context information for the AI,example=.cursorrules,example=CRUSH.md"`
+	TUI                  *TUIOptions              `json:"tui,omitempty" jsonschema:"description=Terminal user interface options"`
+	Debug                bool                     `json:"debug,omitempty" jsonschema:"description=Enable debug logging,default=false"`
+	DebugLSP             bool                     `json:"debug_lsp,omitempty" jsonschema:"description=Enable debug logging for LSP servers,default=false"`
+	DisableAutoSummarize bool                     `json:"disable_auto_summarize,omitempty" jsonschema:"description=Disable automatic conversation summarization,default=false"`
+	DataDirectory        string                   `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data (relative to working directory),default=.crush,example=.crush"` // Relative to the cwd
+	EditVerification     *EditVerificationOptions `json:"edit_verification,omitempty" jsonschema:"description=Edit verification middleware configuration"`
 }
 
 type MCPs map[string]MCPConfig

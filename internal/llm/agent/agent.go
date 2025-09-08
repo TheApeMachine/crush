@@ -23,6 +23,7 @@ import (
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/charmbracelet/crush/internal/session"
 	"github.com/charmbracelet/crush/internal/shell"
+	"github.com/charmbracelet/crush/internal/treesitter"
 )
 
 // Common errors
@@ -83,6 +84,8 @@ type agent struct {
 	activeRequests *csync.Map[string, context.CancelFunc]
 
 	promptQueue *csync.Map[string, []string]
+
+	middlewareManager *MiddlewareManager
 }
 
 var agentPromptMap = map[string]prompt.PromptID{
@@ -180,6 +183,13 @@ func NewAgent(
 		}()
 
 		cwd := cfg.WorkingDir()
+
+		// Initialize TreeSitter registry for AST-powered tools
+		registry := treesitter.NewRegistry()
+		if err := registry.RegisterParser(treesitter.LanguageGo); err != nil {
+			slog.Warn("Failed to register Go parser for TreeSitter tools", "error", err)
+		}
+
 		allTools := []tools.BaseTool{
 			tools.NewBashTool(permissions, cwd),
 			tools.NewDownloadTool(permissions, cwd),
@@ -192,6 +202,12 @@ func NewAgent(
 			tools.NewSourcegraphTool(),
 			tools.NewViewTool(lspClients, permissions, cwd),
 			tools.NewWriteTool(lspClients, permissions, history, cwd),
+			// TreeSitter-powered tools
+			tools.NewSymbolsTool(registry, cwd),
+			tools.NewImpactTool(registry, cwd),
+			tools.NewContextPackerTool(registry, cwd),
+			tools.NewFindRefsTool(registry, cwd),
+			tools.NewGoToDefTool(registry, cwd),
 		}
 
 		mcpToolsOnce.Do(func() {
@@ -220,6 +236,29 @@ func NewAgent(
 		return filteredTools
 	}
 
+	// Initialize middleware
+	middlewareManager := NewMiddlewareManager()
+
+	// Add edit verification middleware if enabled
+	if cfg.Options != nil && cfg.Options.EditVerification != nil && cfg.Options.EditVerification.Enabled {
+		registry := treesitter.NewRegistry()
+		if err := registry.RegisterParser(treesitter.LanguageGo); err != nil {
+			slog.Warn("Failed to register Go parser for edit verification middleware", "error", err)
+		}
+
+		editConfig := EditVerificationConfig{
+			Enabled:                cfg.Options.EditVerification.Enabled,
+			BlastRadiusThreshold:   cfg.Options.EditVerification.BlastRadiusThreshold,
+			RequireApprovalForHigh: cfg.Options.EditVerification.RequireApprovalForHigh,
+			AutoRollbackOnError:    cfg.Options.EditVerification.AutoRollbackOnError,
+			AnalysisTimeout:        cfg.Options.EditVerification.AnalysisTimeout,
+		}
+
+		editMiddleware := NewEditVerificationMiddleware(registry, cfg.WorkingDir(), editConfig)
+		middlewareManager.AddMiddleware(editMiddleware)
+		slog.Info("Edit verification middleware enabled", "agent", agentCfg.ID)
+	}
+
 	return &agent{
 		Broker:              pubsub.NewBroker[AgentEvent](),
 		agentCfg:            agentCfg,
@@ -233,6 +272,7 @@ func NewAgent(
 		activeRequests:      csync.NewMap[string, context.CancelFunc](),
 		tools:               csync.NewLazySlice(toolFn),
 		promptQueue:         csync.NewMap[string, []string](),
+		middlewareManager:   middlewareManager,
 	}, nil
 }
 
@@ -574,6 +614,40 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 				continue
 			}
 
+			// Execute middleware pre-check
+			if a.middlewareManager != nil {
+				preResult, err := a.middlewareManager.ExecutePre(ctx, tools.ToolCall{
+					ID:    toolCall.ID,
+					Name:  toolCall.Name,
+					Input: toolCall.Input,
+				}, sessionID)
+				if err != nil {
+					slog.Error("Middleware pre-execution error", "error", err)
+					toolResults[i] = message.ToolResult{
+						ToolCallID: toolCall.ID,
+						Content:    fmt.Sprintf("Middleware error: %s", err.Error()),
+						IsError:    true,
+					}
+					continue
+				}
+				if !preResult.AllowExecution {
+					if preResult.Response != nil {
+						toolResults[i] = message.ToolResult{
+							ToolCallID: toolCall.ID,
+							Content:    preResult.Response.Content,
+							IsError:    preResult.Response.IsError,
+						}
+					} else {
+						toolResults[i] = message.ToolResult{
+							ToolCallID: toolCall.ID,
+							Content:    preResult.Message,
+							IsError:    true,
+						}
+					}
+					continue
+				}
+			}
+
 			// Run tool in goroutine to allow cancellation
 			type toolExecResult struct {
 				response tools.ToolResponse
@@ -608,6 +682,34 @@ func (a *agent) streamAndHandleEvents(ctx context.Context, sessionID string, msg
 			case result := <-resultChan:
 				toolResponse = result.response
 				toolErr = result.err
+			}
+
+			// Execute middleware post-check
+			if a.middlewareManager != nil {
+				postResult, err := a.middlewareManager.ExecutePost(ctx, tools.ToolCall{
+					ID:    toolCall.ID,
+					Name:  toolCall.Name,
+					Input: toolCall.Input,
+				}, toolResponse, sessionID)
+				if err != nil {
+					slog.Error("Middleware post-execution error", "error", err)
+				}
+				if !postResult.AllowExecution {
+					if postResult.Response != nil {
+						toolResults[i] = message.ToolResult{
+							ToolCallID: toolCall.ID,
+							Content:    postResult.Response.Content,
+							IsError:    postResult.Response.IsError,
+						}
+					} else {
+						toolResults[i] = message.ToolResult{
+							ToolCallID: toolCall.ID,
+							Content:    postResult.Message,
+							IsError:    true,
+						}
+					}
+					continue
+				}
 			}
 
 			if toolErr != nil {
