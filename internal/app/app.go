@@ -68,9 +68,15 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 		allowedTools = cfg.Permissions.AllowedTools
 	}
 
-	indexer, err := NewIndexer(ctx, cfg, q)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create indexer: %w", err)
+	var indexer *Indexer
+	// Only create the indexer if we have a valid DB connection.
+	// Tests may pass a nil connection; in that case, skip indexing entirely.
+	if conn != nil {
+		var err error
+		indexer, err = NewIndexer(ctx, cfg, q)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create indexer: %w", err)
+		}
 	}
 
 	app := &App{
@@ -98,8 +104,10 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 	// Initialize LSP clients in the background.
 	app.initLSPClients(ctx)
 
-	// Start the indexer to scan the workspace
-	app.Indexer.Start()
+	// Start the indexer to scan the workspace when we have a working directory
+	if app.Indexer != nil && app.config.WorkingDir() != "" {
+		app.Indexer.Start()
+	}
 
 	// TODO: remove the concept of agent config, most likely.
 	if cfg.IsConfigured() {

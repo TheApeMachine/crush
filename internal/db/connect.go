@@ -60,3 +60,38 @@ func Connect(ctx context.Context, dataDir string) (*sql.DB, error) {
 	}
 	return db, nil
 }
+
+// ConnectInMemoryForTest opens an in-memory SQLite database and applies embedded migrations.
+// Intended for unit tests that need a real database without touching disk.
+func ConnectInMemoryForTest(ctx context.Context) (*sql.DB, error) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return nil, fmt.Errorf("failed to open in-memory database: %w", err)
+	}
+
+	if err = db.PingContext(ctx); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to connect to in-memory database: %w", err)
+	}
+
+	// Reasonable pragmas for tests
+	pragmas := []string{
+		"PRAGMA foreign_keys = ON;",
+		"PRAGMA journal_mode = WAL;",
+		"PRAGMA synchronous = OFF;",
+	}
+	for _, pragma := range pragmas {
+		if _, err = db.ExecContext(ctx, pragma); err != nil {
+			slog.Error("Failed to set pragma", "pragma", pragma, "error", err)
+		}
+	}
+
+	goose.SetBaseFS(FS)
+	if err := goose.SetDialect("sqlite3"); err != nil {
+		return nil, fmt.Errorf("failed to set dialect: %w", err)
+	}
+	if err := goose.Up(db, "migrations"); err != nil {
+		return nil, fmt.Errorf("failed to apply migrations: %w", err)
+	}
+	return db, nil
+}
