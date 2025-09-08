@@ -210,17 +210,24 @@ func (i *Indexer) IndexFile(path string) error {
 		slog.Error("Failed to store symbol graph", "path", relPath, "error", err)
 		return err
 	}
-	_ = i.storage.UpdateFileMetadata(i.ctx, relPath, checksum)
+	if err := i.storage.UpdateFileMetadata(i.ctx, relPath, checksum); err != nil {
+		slog.Warn("Failed to update file metadata", "path", relPath, "error", err)
+		IndexerWarn("Failed to update file metadata", relPath)
+	}
 
 	// For Go files, resolve exact call edges using go/types and store them
 	if lang == treesitter.LanguageGo {
 		if resolved, rerr := resolution.ResolveCallsForFile(i.ctx, i.cfg.WorkingDir(), relPath); rerr == nil {
 			if len(resolved) > 0 {
 				slog.Debug("Storing resolved Go call relationships", "count", len(resolved), "path", relPath)
-				_ = i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved)
+				if err := i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved); err != nil {
+					slog.Warn("Failed to store resolved Go relationships", "path", relPath, "error", err)
+					IndexerWarn("Failed storing Go relationships", relPath)
+				}
 			}
 		} else {
 			slog.Debug("Go resolver failed", "path", relPath, "error", rerr)
+			IndexerWarn("Go call resolution failed", relPath)
 		}
 	}
 
@@ -244,10 +251,14 @@ func (i *Indexer) IndexFile(path string) error {
 			if resolved, rerr := resolution.ResolveTSCallsForFile(i.ctx, tsClient, i.cfg.WorkingDir(), relPath); rerr == nil {
 				if len(resolved) > 0 {
 					slog.Debug("Storing resolved TS/JS call relationships", "count", len(resolved), "path", relPath)
-					_ = i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved)
+					if err := i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved); err != nil {
+						slog.Warn("Failed to store resolved TS/JS relationships", "path", relPath, "error", err)
+						IndexerWarn("Failed storing TS/JS relationships", relPath)
+					}
 				}
 			} else {
 				slog.Debug("TS/JS resolver failed", "path", relPath, "error", rerr)
+				IndexerWarn("TS/JS call resolution failed", relPath)
 			}
 		}
 	}

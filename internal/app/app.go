@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/crush/internal/llm/agent"
 	"github.com/charmbracelet/crush/internal/log"
 	"github.com/charmbracelet/crush/internal/pubsub"
+	"github.com/charmbracelet/crush/internal/tui/util"
 
 	"github.com/charmbracelet/crush/internal/lsp"
 	"github.com/charmbracelet/crush/internal/message"
@@ -253,6 +254,7 @@ func (app *App) setupEvents() {
 	setupSubscriber(ctx, app.serviceEventsWG, "history", app.History.Subscribe, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "mcp", agent.SubscribeMCPEvents, app.events)
 	setupSubscriber(ctx, app.serviceEventsWG, "lsp", SubscribeLSPEvents, app.events)
+	setupSubscriber(ctx, app.serviceEventsWG, "indexer", SubscribeIndexerEvents, app.events)
 	cleanupFunc := func() {
 		cancel()
 		app.serviceEventsWG.Wait()
@@ -345,6 +347,21 @@ func (app *App) Subscribe(program *tea.Program) {
 			if !ok {
 				slog.Debug("TUI message channel closed")
 				return
+			}
+			// Map indexer pubsub events to status bar messages
+			switch ev := msg.(type) {
+			case pubsub.Event[IndexEREventWrapper]:
+				var infoType util.InfoType
+				switch ev.Payload.Type {
+				case IndexerEventWarn:
+					infoType = util.InfoTypeWarn
+				case IndexerEventError:
+					infoType = util.InfoTypeError
+				default:
+					infoType = util.InfoTypeInfo
+				}
+				program.Send(util.InfoMsg{Type: infoType, Msg: ev.Payload.Message + ": " + ev.Payload.Path})
+				continue
 			}
 			program.Send(msg)
 		}

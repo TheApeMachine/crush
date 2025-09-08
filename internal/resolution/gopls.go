@@ -12,7 +12,13 @@ import (
 )
 
 // ResolveGoCallsWithLSP resolves Go call sites to exact definitions using gopls via the LSP client.
-// This is an alternative to the go/types-based resolver and returns single-target call edges.
+//
+// Notes:
+//   - This is an alternative to the go/packages/go/types-based resolver in golang.go.
+//   - It is not currently invoked by the indexer; the indexer uses ResolveCallsForFile for Go.
+//   - Keep this as an optional path if we later want to unify resolution via LSP for all languages
+//     or to experiment with performance/accuracy trade-offs compared to go/packages.
+//   - Returns single-target call edges with IDs formatted as name:line:column, matching storage.
 func ResolveGoCallsWithLSP(ctx context.Context, client *lsp.Client, workspaceRoot, relFilename string) ([]treesitter.Relationship, error) {
 	absFile := filepath.Join(workspaceRoot, relFilename)
 	source, err := os.ReadFile(absFile)

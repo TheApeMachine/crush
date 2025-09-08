@@ -28,6 +28,56 @@ type User struct {
 	Age  int
 }
 
+// Additional helper-focused tests (appended)
+func TestContextPacker_extractGoImport_variants(t *testing.T) {
+	tool := &contextPackerTool{}
+	if got := tool.extractGoImport("import \"fmt\""); got != "fmt" {
+		t.Fatalf("single import: want fmt, got %q", got)
+	}
+	if got := tool.extractGoImport("alias \"github.com/x/y\""); got != "github.com/x/y" {
+		t.Fatalf("alias import: want github.com/x/y, got %q", got)
+	}
+}
+
+func TestContextPacker_createSymbolSignature_variants(t *testing.T) {
+	tool := &contextPackerTool{}
+
+	vr := tool.createSymbolSignature(treesitter.Symbol{
+		Name:       "buf",
+		Type:       treesitter.SymbolTypeVariable,
+		ReturnType: "[]byte",
+	})
+	if vr != "var buf []byte" {
+		t.Fatalf("variable signature: got %q", vr)
+	}
+
+	cs := tool.createSymbolSignature(treesitter.Symbol{
+		Name:       "Version",
+		Type:       treesitter.SymbolTypeConstant,
+		ReturnType: "string",
+	})
+	if cs != "const Version string" {
+		t.Fatalf("constant signature: got %q", cs)
+	}
+}
+
+func TestContextPacker_findFunctionEnd_balanced(t *testing.T) {
+	tool := &contextPackerTool{}
+	lines := []string{
+		"package main",
+		"",
+		"func X() {",
+		"  if true {",
+		"    _ = 1",
+		"  }",
+		"}",
+	}
+	end := tool.findFunctionEnd(lines, 2)
+	if end != 6 {
+		t.Fatalf("findFunctionEnd: want 6, got %d", end)
+	}
+}
+
 func main() {
 	user := User{Name: "John", Age: 30}
 	fmt.Println(user)

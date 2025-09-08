@@ -275,3 +275,25 @@ func TestEditVerificationMiddleware_PostExecute_NonEditTool(t *testing.T) {
 		t.Error("Expected non-edit tool post-execution to be allowed")
 	}
 }
+
+// Additional middleware edge cases (appended)
+func TestEditVerificationMiddleware_parseImpactAnalysis_Robust(t *testing.T) {
+	m := &EditVerificationMiddleware{}
+	// missing parts should not crash
+	content := "Random\n📊 Blast Radius: 3 files affected\nNoise\n"
+	analysis, err := m.parseImpactAnalysis(content)
+	if err != nil {
+		t.Fatalf("parseImpactAnalysis error: %v", err)
+	}
+	if analysis.BlastRadius != 3 {
+		t.Fatalf("expected blast radius 3, got %d", analysis.BlastRadius)
+	}
+}
+
+func TestMiddlewareManager_EmptyPost(t *testing.T) {
+	manager := NewMiddlewareManager()
+	res, err := manager.ExecutePost(context.Background(), tools.ToolCall{Name: "anything"}, tools.ToolResponse{Content: "ok"}, "s")
+	if err != nil || !res.AllowExecution {
+		t.Fatalf("expected allow, got err=%v allow=%v", err, res.AllowExecution)
+	}
+}

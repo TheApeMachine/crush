@@ -249,3 +249,17 @@ func TestImpactAnalysis(t *testing.T) {
 		t.Errorf("Expected higher risk level than Low, got %s", risk)
 	}
 }
+
+// Additional helper-focused tests (appended)
+func TestCalculateRiskLevel_Bounds(t *testing.T) {
+	tool := &impactTool{}
+	cases := []struct {
+		in   float64
+		want string
+	}{{0, "Low"}, {5, "Low"}, {15, "Medium"}, {50, "High"}, {51, "Critical"}}
+	for _, c := range cases {
+		if got := tool.calculateRiskLevel(c.in); got != c.want {
+			t.Fatalf("risk(%v) => %s, got %s", c.in, c.want, got)
+		}
+	}
+}

@@ -306,3 +306,16 @@ func TestSignatureCreation(t *testing.T) {
 		t.Errorf("Expected signature '%s', got '%s'", expected, signature)
 	}
 }
+
+// Additional helper-focused tests (appended)
+func TestExtractIdentifierAtPosition_Bounds(t *testing.T) {
+	tool := &goToDefTool{}
+	// out of bounds line
+	if id := tool.extractIdentifierAtPosition(999, 1, "one\n"); id != "" {
+		t.Fatalf("expected empty identifier for OOB line, got %q", id)
+	}
+	// out of bounds column
+	if id := tool.extractIdentifierAtPosition(1, 999, "one\n"); id != "" {
+		t.Fatalf("expected empty identifier for OOB column, got %q", id)
+	}
+}
