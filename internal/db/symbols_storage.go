@@ -71,8 +71,8 @@ func (s *SymbolGraphStorage) StoreSymbolGraph(ctx context.Context, filename, lan
 	}
 
 	// Store symbols
-	symbolIDMap := make(map[string]string) // treesitter ID to db ID
-	nameToDBID := make(map[string]string)  // symbol name to db ID (best-effort)
+	symbolIDMap := make(map[string]string)   // treesitter ID to db ID
+	nameToDBIDs := make(map[string][]string) // symbol name to db IDs (track duplicates)
 	for _, symbol := range graph.Symbols {
 		params, err := json.Marshal(symbol.Parameters)
 		if err != nil {
@@ -102,11 +102,9 @@ func (s *SymbolGraphStorage) StoreSymbolGraph(ctx context.Context, filename, lan
 			return fmt.Errorf("failed to create symbol: %w", err)
 		}
 		symbolIDMap[symbol.ID] = dbSymbol.ID
-		// Best-effort name -> ID mapping to resolve relationships that reference names
+		// Track name -> IDs mapping to detect ambiguous names within the same file
 		if symbol.Name != "" {
-			if _, exists := nameToDBID[symbol.Name]; !exists {
-				nameToDBID[symbol.Name] = dbSymbol.ID
-			}
+			nameToDBIDs[symbol.Name] = append(nameToDBIDs[symbol.Name], dbSymbol.ID)
 		}
 	}
 
@@ -118,34 +116,55 @@ func (s *SymbolGraphStorage) StoreSymbolGraph(ctx context.Context, filename, lan
 		for _, rel := range rels {
 			slog.Debug("Processing relationship", "from", rel.From, "to", rel.To, "type", rel.Type)
 
-			// Both From and To must be symbols that exist. Resolve in-file first; then fall back to cross-file by name.
+			// Resolve symbols, preferring in-file IDs, then cross-file by name with language-aware filtering.
 			fromSymbolID, fromExists := symbolIDMap[rel.From]
 			if !fromExists && rel.From != "" {
-				if id, ok := nameToDBID[rel.From]; ok {
-					fromSymbolID, fromExists = id, true
-					slog.Debug("Resolved 'from' by name", "from_name", rel.From, "from_id", fromSymbolID)
-				}
-			}
-			// Cross-file fallback for 'from'
-			if !fromExists && rel.From != "" {
-				if candidates, err := qtx.ListSymbolsByName(ctx, rel.From); err == nil && len(candidates) == 1 {
-					fromSymbolID, fromExists = candidates[0].ID, true
-					slog.Debug("Resolved 'from' cross-file by name", "from_name", rel.From, "from_id", fromSymbolID)
+				// Resolve by unique in-file name
+				if ids, ok := nameToDBIDs[rel.From]; ok && len(ids) == 1 {
+					fromSymbolID, fromExists = ids[0], true
+					slog.Debug("Resolved 'from' by unique in-file name", "from_name", rel.From, "from_id", fromSymbolID)
 				}
 			}
 
 			toSymbolID, toExists := symbolIDMap[rel.To]
 			if !toExists && rel.To != "" {
-				if id, ok := nameToDBID[rel.To]; ok {
-					toSymbolID, toExists = id, true
-					slog.Debug("Resolved 'to' by name", "to_name", rel.To, "to_id", toSymbolID)
+				// Resolve by unique in-file name
+				if ids, ok := nameToDBIDs[rel.To]; ok && len(ids) == 1 {
+					toSymbolID, toExists = ids[0], true
+					slog.Debug("Resolved 'to' by unique in-file name", "to_name", rel.To, "to_id", toSymbolID)
 				}
 			}
-			// Cross-file fallback for 'to'
+
+			// Cross-file fallback for 'to': gather candidates by name and prefer same language
+			var targetIDs []string
 			if !toExists && rel.To != "" {
-				if candidates, err := qtx.ListSymbolsByName(ctx, rel.To); err == nil && len(candidates) == 1 {
-					toSymbolID, toExists = candidates[0].ID, true
-					slog.Debug("Resolved 'to' cross-file by name", "to_name", rel.To, "to_id", toSymbolID)
+				if candidates, err := qtx.ListSymbolsByName(ctx, rel.To); err == nil && len(candidates) > 0 {
+					filtered := make([]string, 0, len(candidates))
+					for _, c := range candidates {
+						// Filter to same language if we can
+						if meta, err := qtx.GetFileMetadata(ctx, c.FilePath); err == nil {
+							if meta.Language == language {
+								filtered = append(filtered, c.ID)
+								continue
+							}
+						}
+					}
+					if len(filtered) == 1 {
+						toSymbolID, toExists = filtered[0], true
+						slog.Debug("Resolved 'to' cross-file by language+name", "to_name", rel.To, "to_id", toSymbolID)
+					} else if len(filtered) > 1 {
+						// Multiple plausible targets: create edges to all to avoid missing cross-file relations
+						targetIDs = filtered
+						slog.Debug("Resolved 'to' to multiple cross-file candidates", "to_name", rel.To, "count", len(filtered))
+					} else {
+						// No same-language candidates; fall back to all candidates
+						for _, c := range candidates {
+							targetIDs = append(targetIDs, c.ID)
+						}
+						if len(targetIDs) > 0 {
+							slog.Debug("Resolved 'to' to multiple cross-file candidates (fallback any language)", "to_name", rel.To, "count", len(targetIDs))
+						}
+					}
 				}
 			}
 
@@ -154,29 +173,33 @@ func (s *SymbolGraphStorage) StoreSymbolGraph(ctx context.Context, filename, lan
 				continue
 			}
 
-			if !toExists {
-				slog.Debug("To symbol not found in current file, skipping relationship", "from", rel.From, "to", rel.To)
+			// Determine final set of target IDs
+			if toExists {
+				targetIDs = []string{toSymbolID}
+			}
+			if len(targetIDs) == 0 {
+				slog.Debug("To symbol not found, skipping relationship", "from", rel.From, "to", rel.To)
 				continue
 			}
 
-			// Generate unique ID for relationship
-			relID := fmt.Sprintf("%s-%s-%s-%d-%d", fromSymbolID, toSymbolID, rel.Type, rel.Position.Line, rel.Position.Column)
-
-			_, err := qtx.CreateRelationship(ctx, CreateRelationshipParams{
-				ID:           relID,
-				FromSymbolID: fromSymbolID,
-				ToSymbolID:   toSymbolID,
-				Type:         string(rel.Type),
-				Line:         int64(rel.Position.Line),
-				Column:       int64(rel.Position.Column),
-			})
-			if err != nil {
-				slog.Error("Failed to create relationship", "error", err, "from", fromSymbolID, "to", toSymbolID)
-				return fmt.Errorf("failed to create relationship: %w", err)
+			// Create relationships for all targets
+			for _, toID := range targetIDs {
+				// Generate unique ID for relationship
+				relID := fmt.Sprintf("%s-%s-%s-%d-%d", fromSymbolID, toID, rel.Type, rel.Position.Line, rel.Position.Column)
+				_, err := qtx.CreateRelationship(ctx, CreateRelationshipParams{
+					ID:           relID,
+					FromSymbolID: fromSymbolID,
+					ToSymbolID:   toID,
+					Type:         string(rel.Type),
+					Line:         int64(rel.Position.Line),
+					Column:       int64(rel.Position.Column),
+				})
+				if err != nil {
+					slog.Error("Failed to create relationship", "error", err, "from", fromSymbolID, "to", toID)
+					return fmt.Errorf("failed to create relationship: %w", err)
+				}
+				relationshipsStored++
 			}
-
-			relationshipsStored++
-			slog.Debug("Successfully stored relationship", "from", fromSymbolID, "to", toSymbolID, "type", rel.Type)
 		}
 	}
 
@@ -358,6 +381,16 @@ func (s *SymbolGraphStorage) UpdateFileMetadata(ctx context.Context, filename st
 	})
 }
 
+// GetFileMetadata returns metadata for a file if it exists.
+func (s *SymbolGraphStorage) GetFileMetadata(ctx context.Context, filename string) (FileMetadatum, error) {
+	return s.db.GetFileMetadata(ctx, filename)
+}
+
+// ListFileMetadata returns all file metadata rows.
+func (s *SymbolGraphStorage) ListFileMetadata(ctx context.Context) ([]FileMetadatum, error) {
+	return s.db.ListFileMetadata(ctx)
+}
+
 // DeleteFileData deletes all symbols and relationships for a file
 func (s *SymbolGraphStorage) DeleteFileData(ctx context.Context, filename string) error {
 	// Start transaction
@@ -385,6 +418,53 @@ func (s *SymbolGraphStorage) DeleteFileData(ctx context.Context, filename string
 	// Delete file metadata
 	if err := qtx.DeleteFileMetadata(ctx, filename); err != nil {
 		return fmt.Errorf("failed to delete file metadata: %w", err)
+	}
+
+	return tx.Commit()
+}
+
+// StoreRelationshipsForFile inserts relationships whose From symbols belong to the given file.
+// It assumes rel.From and rel.To are already symbol IDs.
+func (s *SymbolGraphStorage) StoreRelationshipsForFile(ctx context.Context, filename string, rels []treesitter.Relationship) error {
+	// Start transaction
+	tx, err := s.db.db.(*sql.DB).BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	qtx := s.db.WithTx(tx)
+
+	// Insert relationships
+	for _, rel := range rels {
+		// Ensure the from symbol belongs to this file; otherwise skip to avoid cross-file ownership conflicts
+		fromSym, err := qtx.GetSymbol(ctx, rel.From)
+		if err != nil {
+			slog.Debug("Skipping relationship with missing from symbol", "from", rel.From, "error", err)
+			continue
+		}
+		if fromSym.FilePath != filename {
+			continue
+		}
+		// Basic existence check for to symbol
+		if _, err := qtx.GetSymbol(ctx, rel.To); err != nil {
+			slog.Debug("Skipping relationship with missing to symbol", "to", rel.To, "error", err)
+			continue
+		}
+
+		relID := fmt.Sprintf("%s-%s-%s-%d-%d", rel.From, rel.To, rel.Type, rel.Position.Line, rel.Position.Column)
+		if _, err := qtx.CreateRelationship(ctx, CreateRelationshipParams{
+			ID:           relID,
+			FromSymbolID: rel.From,
+			ToSymbolID:   rel.To,
+			Type:         string(rel.Type),
+			Line:         int64(rel.Position.Line),
+			Column:       int64(rel.Position.Column),
+		}); err != nil {
+			slog.Debug("Failed inserting relationship", "id", relID, "error", err)
+			// Continue inserting others rather than failing the batch
+			continue
+		}
 	}
 
 	return tx.Commit()

@@ -160,8 +160,7 @@ func (e *GoSymbolExtractor) ExtractSymbols(tree *sitter.Tree, source []byte) ([]
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
-				// Log the panic but don't crash
-				// The symbols found before the panic will still be returned
+				slog.Error("Panic in GoSymbolExtractor", "panic", r)
 			}
 		}()
 

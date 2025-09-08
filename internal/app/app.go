@@ -104,6 +104,17 @@ func New(ctx context.Context, conn *sql.DB, cfg *config.Config) (*App, error) {
 	// Initialize LSP clients in the background.
 	app.initLSPClients(ctx)
 
+	// Expose LSP clients to indexer via hook so JS/TS resolution can run during indexing
+	SetIndexerLSPGetter(func() map[string]*lsp.Client {
+		app.clientsMutex.RLock()
+		defer app.clientsMutex.RUnlock()
+		cpy := make(map[string]*lsp.Client, len(app.LSPClients))
+		for k, v := range app.LSPClients {
+			cpy[k] = v
+		}
+		return cpy
+	})
+
 	// Start the indexer to scan the workspace when we have a working directory
 	if app.Indexer != nil && app.config.WorkingDir() != "" {
 		app.Indexer.Start()

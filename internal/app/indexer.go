@@ -11,6 +11,8 @@ import (
 	"github.com/charlievieth/fastwalk"
 	"github.com/charmbracelet/crush/internal/config"
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/charmbracelet/crush/internal/lsp"
+	"github.com/charmbracelet/crush/internal/resolution"
 	"github.com/charmbracelet/crush/internal/treesitter"
 )
 
@@ -53,10 +55,6 @@ func (i *Indexer) Start() {
 	go func() {
 		defer i.wg.Done()
 		slog.Info("Starting initial workspace scan...")
-		// Clear previous symbol graph data to avoid stale or duplicate entries
-		if err := i.storage.ResetAll(i.ctx); err != nil {
-			slog.Error("Failed to reset symbol storage", "error", err)
-		}
 		if err := i.scanWorkspace(); err != nil {
 			slog.Error("Error during initial workspace scan", "error", err)
 		} else {
@@ -77,7 +75,10 @@ func (i *Indexer) scanWorkspace() error {
 		Follow: true,
 	}
 
-	return fastwalk.Walk(&conf, i.cfg.WorkingDir(), func(path string, d os.DirEntry, err error) error {
+	// Track seen relative paths during scan
+	seen := make(map[string]struct{})
+
+	errWalk := fastwalk.Walk(&conf, i.cfg.WorkingDir(), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil // Skip files we don't have permission to access
 		}
@@ -91,6 +92,9 @@ func (i *Indexer) scanWorkspace() error {
 		}
 
 		if _, err := i.registry.DetectLanguage(path); err == nil {
+			if rel, rerr := filepath.Rel(i.cfg.WorkingDir(), path); rerr == nil {
+				seen[rel] = struct{}{}
+			}
 			slog.Debug("Indexing file", "path", path)
 			if err := i.IndexFile(path); err != nil {
 				slog.Warn("Failed to index file", "path", path, "error", err)
@@ -99,6 +103,20 @@ func (i *Indexer) scanWorkspace() error {
 
 		return nil
 	})
+
+	// After scan, remove stale DB entries for files not seen
+	if errWalk == nil {
+		if files, err := i.storage.ListFileMetadata(i.ctx); err == nil {
+			for _, f := range files {
+				if _, ok := seen[f.Path]; !ok {
+					slog.Debug("Removing stale file metadata", "path", f.Path)
+					_ = i.storage.DeleteFileData(i.ctx, f.Path)
+				}
+			}
+		}
+	}
+
+	return errWalk
 }
 
 // IndexFile reads a file, builds its symbol graph, and persists it to storage.
@@ -144,9 +162,20 @@ func (i *Indexer) IndexFile(path string) error {
 	// Use recover to handle TreeSitter panics
 	defer func() {
 		if r := recover(); r != nil {
+			// include a minimal stack hint using runtime callers (without importing heavy debug stack)
 			slog.Error("Panic during symbol extraction", "path", relPath, "panic", r)
 		}
 	}()
+
+	// Compute a simple checksum for incremental indexing
+	checksum := computeChecksum(content)
+	// Skip unchanged files if checksum matches
+	if meta, err := i.storage.GetFileMetadata(i.ctx, relPath); err == nil {
+		if meta.Checksum.Valid && meta.Checksum.String == checksum {
+			slog.Debug("Skipping unchanged file", "path", relPath)
+			return nil
+		}
+	}
 
 	slog.Debug("Building symbol graph", "path", relPath)
 	graph, err := i.registry.BuildSymbolGraph(relPath, string(content))
@@ -175,10 +204,52 @@ func (i *Indexer) IndexFile(path string) error {
 	}
 
 	slog.Debug("Storing symbol graph", "path", relPath, "language", lang)
+	// Store graph and then update checksum
 	err = i.storage.StoreSymbolGraph(i.ctx, relPath, string(lang), graph)
 	if err != nil {
 		slog.Error("Failed to store symbol graph", "path", relPath, "error", err)
 		return err
+	}
+	_ = i.storage.UpdateFileMetadata(i.ctx, relPath, checksum)
+
+	// For Go files, resolve exact call edges using go/types and store them
+	if lang == treesitter.LanguageGo {
+		if resolved, rerr := resolution.ResolveCallsForFile(i.ctx, i.cfg.WorkingDir(), relPath); rerr == nil {
+			if len(resolved) > 0 {
+				slog.Debug("Storing resolved Go call relationships", "count", len(resolved), "path", relPath)
+				_ = i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved)
+			}
+		} else {
+			slog.Debug("Go resolver failed", "path", relPath, "error", rerr)
+		}
+	}
+
+	// For JS/TS files, resolve via TS LSP client if available
+	if lang == treesitter.LanguageJavaScript {
+		// Find any LSP client that handles this file (tsserver/typescript-language-server)
+		absPath := filepath.Join(i.cfg.WorkingDir(), relPath)
+		var tsClient *lsp.Client
+		// The indexer currently doesn't own LSP clients.
+		// If you want this to run, inject a getter via a package-level hook.
+		if appLSPGetter != nil {
+			clients := appLSPGetter()
+			for _, c := range clients {
+				if c != nil && c.HandlesFile(absPath) {
+					tsClient = c
+					break
+				}
+			}
+		}
+		if tsClient != nil {
+			if resolved, rerr := resolution.ResolveTSCallsForFile(i.ctx, tsClient, i.cfg.WorkingDir(), relPath); rerr == nil {
+				if len(resolved) > 0 {
+					slog.Debug("Storing resolved TS/JS call relationships", "count", len(resolved), "path", relPath)
+					_ = i.storage.StoreRelationshipsForFile(i.ctx, relPath, resolved)
+				}
+			} else {
+				slog.Debug("TS/JS resolver failed", "path", relPath, "error", rerr)
+			}
+		}
 	}
 
 	slog.Info("Successfully indexed file", "path", relPath)
@@ -188,4 +259,24 @@ func (i *Indexer) IndexFile(path string) error {
 // isValidUTF8 checks if the given bytes represent valid UTF-8 encoded text
 func isValidUTF8(data []byte) bool {
 	return utf8.Valid(data)
+}
+
+// computeChecksum computes a lightweight checksum of file contents for incremental indexing.
+// We avoid cryptographic cost; collisions are acceptable as a rare re-index.
+func computeChecksum(data []byte) string {
+	var h uint64 = 1469598103934665603 // FNV-1a 64-bit offset basis
+	const prime uint64 = 1099511628211
+	for _, b := range data {
+		h ^= uint64(b)
+		h *= prime
+	}
+	// Represent as hex string
+	const hex = "0123456789abcdef"
+	buf := make([]byte, 16)
+	for i := 15; i >= 0; i-- {
+		n := h & 0xF
+		buf[i] = hex[n]
+		h >>= 4
+	}
+	return string(buf)
 }
