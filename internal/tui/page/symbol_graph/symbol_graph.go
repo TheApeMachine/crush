@@ -175,7 +175,7 @@ func (p *symbolGraphPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, p.keyMap.PanUp):
 			if p.focusedPanel == PanelTypeGraph {
 				if p.graphMode {
-					p.navigateGraphSelection(-1)
+					p.navigateGraphVertical(-1)
 				} else {
 					p.navigateSymbols(-1)
 				}
@@ -184,7 +184,7 @@ func (p *symbolGraphPage) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, p.keyMap.PanDown):
 			if p.focusedPanel == PanelTypeGraph {
 				if p.graphMode {
-					p.navigateGraphSelection(1)
+					p.navigateGraphVertical(1)
 				} else {
 					p.navigateSymbols(1)
 				}
@@ -914,9 +914,9 @@ func (p *symbolGraphPage) navigateGraphSelection(direction int) {
 	}
 	if sym, ok := p.symbolGraph.Symbols[p.graphVisible[newIdx]]; ok {
 		p.selectedSymbol = sym
-		// Center the graph on the active selection
-		p.focusSymbolID = sym.ID
+		// Only move highlight; Enter will center on selection
 		p.updateGraphView()
+		p.updateDetailsView()
 	}
 }
 
@@ -925,19 +925,116 @@ func (p *symbolGraphPage) navigateGraphHorizontal(dir int) {
 	if p.symbolGraph == nil || p.selectedSymbol == nil {
 		return
 	}
-	// Find candidate nodes to the left/right of current selection
+	// Build column-wise layout and prefer the nearest column in the given direction,
+	// then the smallest vertical delta within that column.
 	type nodePos struct {
 		id   string
 		x, y int
+		col  int // negative=left, 0=center, positive=right
 	}
 	positions := make(map[string]nodePos)
-	// Rebuild positions for current render by calling buildGraphSides and computing x positions like renderer
+	cols := make(map[int][]nodePos)
+	// Rebuild positions similar to renderer
 	leftLevels, rightLevels := p.buildGraphSides(p.focusSymbolID, p.graphDepth)
 	boxW := 24
 	colW := boxW + 12
 	leftCols := len(leftLevels)
 	centerColX := 2 + leftCols*colW
-	// map positions
+	height := p.graphH
+	if height <= 0 {
+		height = 20
+	}
+	addColumn := func(colIndex, colX int, ids []string) {
+		if len(ids) == 0 {
+			return
+		}
+		gap := height / (len(ids) + 1)
+		if gap < 4 {
+			gap = 4
+		}
+		for i, id := range ids {
+			y := 1 + i*gap
+			n := nodePos{id: id, x: colX, y: y, col: colIndex}
+			positions[id] = n
+			cols[colIndex] = append(cols[colIndex], n)
+		}
+	}
+	// left columns: -1, -2, ...
+	for i, ids := range leftLevels {
+		x := centerColX - (i+1)*colW
+		addColumn(-(i + 1), x, ids)
+	}
+	// center column: 0
+	addColumn(0, centerColX, []string{p.focusSymbolID})
+	// right columns: +1, +2, ...
+	for i, ids := range rightLevels {
+		x := centerColX + (i+1)*colW
+		addColumn(i+1, x, ids)
+	}
+
+	cur := positions[p.selectedSymbol.ID]
+	if dir == 0 {
+		return
+	}
+	step := 1
+	if dir < 0 {
+		step = -1
+	}
+	// search nearest column in the intended direction
+	for c := cur.col + step; ; c += step {
+		candidates, ok := cols[c]
+		if !ok {
+			// stop if we've moved beyond all known columns
+			if (step < 0 && c < -len(leftLevels)) || (step > 0 && c > len(rightLevels)) {
+				break
+			}
+			continue
+		}
+		// choose by minimal |dy|; tie-break by minimal |dx|
+		best := nodePos{}
+		bestScore := int(^uint(0) >> 1)
+		for _, n := range candidates {
+			dy := n.y - cur.y
+			if dy < 0 {
+				dy = -dy
+			}
+			dx := n.x - cur.x
+			if dx < 0 {
+				dx = -dx
+			}
+			score := dy*10 + dx // prefer vertical proximity heavily
+			if score < bestScore {
+				bestScore = score
+				best = n
+			}
+		}
+		if best.id != "" {
+			if sym, ok := p.symbolGraph.Symbols[best.id]; ok {
+				p.selectedSymbol = sym
+				p.updateGraphView()
+				p.updateDetailsView()
+			}
+			return
+		}
+	}
+}
+
+// navigateGraphVertical moves selection to nearest node vertically (-1 up, +1 down)
+func (p *symbolGraphPage) navigateGraphVertical(dir int) {
+	if p.symbolGraph == nil || p.selectedSymbol == nil {
+		return
+	}
+	// Build positions similar to renderer
+	type nodePos struct {
+		id   string
+		x, y int
+	}
+	positions := make(map[string]nodePos)
+	leftLevels, rightLevels := p.buildGraphSides(p.focusSymbolID, p.graphDepth)
+	boxW := 24
+	colW := boxW + 12
+	leftCols := len(leftLevels)
+	centerColX := 2 + leftCols*colW
 	height := p.graphH
 	if height <= 0 {
 		height = 20
@@ -970,23 +1067,23 @@ func (p *symbolGraphPage) navigateGraphHorizontal(dir int) {
 
 	cur := positions[p.selectedSymbol.ID]
 	best := nodePos{}
-	bestDist := int(^uint(0) >> 1) // max int
+	bestDist := int(^uint(0) >> 1)
 	for _, n := range positions {
-		if dir < 0 && n.x >= cur.x {
+		if dir < 0 && n.y >= cur.y {
 			continue
 		}
-		if dir > 0 && n.x <= cur.x {
+		if dir > 0 && n.y <= cur.y {
 			continue
-		}
-		dx := n.x - cur.x
-		if dx < 0 {
-			dx = -dx
 		}
 		dy := n.y - cur.y
 		if dy < 0 {
 			dy = -dy
 		}
-		d := dx*dx + dy*dy
+		dx := n.x - cur.x
+		if dx < 0 {
+			dx = -dx
+		}
+		d := dy*dy + dx*dx
 		if d < bestDist {
 			bestDist = d
 			best = n
@@ -995,8 +1092,9 @@ func (p *symbolGraphPage) navigateGraphHorizontal(dir int) {
 	if best.id != "" {
 		if sym, ok := p.symbolGraph.Symbols[best.id]; ok {
 			p.selectedSymbol = sym
-			p.focusSymbolID = sym.ID
+			// Only move highlight; Enter will center on selection
 			p.updateGraphView()
+			p.updateDetailsView()
 		}
 	}
 }
